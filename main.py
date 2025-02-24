@@ -38,89 +38,53 @@ class WeatherPlugin(Star):
             return None
 
     def _parse_weather_text(self, text: str) -> Dict[str, str]:
-    """改进后的文本解析方法"""
-    result = {}
-    lines = text.strip().split("\n")
-    
-    if len(lines) < 2:
-        return {"error": "无效的天气数据格式"}
-    
-    # 解析地区名称（处理可能的列表格式）
-    location_line = lines.strip("[]'")
-    if "','" in location_line:  # 处理数组格式
-        result["location"] = location_line.split("', '")
-    else:
-        result["location"] = location_line
-    
-    # 解析数据字段
-    for line in lines[1:]:
-        line = line.strip().strip("',")
-        if not line:
-            continue
+        """解析文本格式的天气数据"""
+        result = {}
+        lines = [line.strip() for line in text.split("\n") if line.strip()]
         
-        # 处理降水提示
-        if "正在下" in line and "转" in line:
-            result["降水提示"] = line.replace("您", "📍").replace("哦，", "，")
-            continue
+        if len(lines) < 2:
+            return {"error": "无效的天气数据格式"}
+
+        # 解析地区信息（第一行）
+        result["location"] = lines
         
-        # 处理预警信息
-        if line.startswith("预警信息："):
-            result["预警信息"] = line[5:].replace("【", "[").replace("】", "]")
-            continue
+        # 解析详细数据（第二行开始）
+        for line in lines[1:]:
+            if "：" in line:
+                key, value = line.split("：", 1)
+                result[key.strip()] = value.strip()
+            elif "正在下" in line:
+                result["降水提示"] = line
+            elif line.startswith("预警信息："):
+                result["预警信息"] = line.replace("预警信息：", "", 1).strip()
+
+        return result
+
+    def _format_message(self, data: Dict[str, str]) -> List[str]:
+        """生成格式化消息"""
+        msg = [
+            f"🌦 精准天气 - {data.get('location', '未知地区')}",
+            "━" * 20
+        ]
+
+        # 基础天气信息
+        keys_order = ["温度", "体感", "湿度", "能见度", "pm2.5", "空气质量", "紫外线强度", "总体感觉"]
+        for key in keys_order:
+            if value := data.get(key):
+                msg.append(f"▫️ {key}: {value}")
+
+        # 降水提示
+        if rain := data.get("降水提示"):
+            msg.extend(["", "🌧️ 降水提示：", f"⚠️ {rain}"])
+
+        # 预警信息
+        if warning := data.get("预警信息"):
+            msg.extend(["", "⚠️ 气象预警：", f"🔴 {warning}"])
+
+        # 数据时间
+        msg.extend(["", f"⏱ 数据时间：{data.get('time', '实时数据')}"])
         
-        # 解析键值对
-        if "：" in line:
-            key, value = line.split("：", 1)
-            key = key.strip().replace("pm2.5", "PM2.5")
-            if key in result:  # 避免重复字段
-                continue
-            result[key] = value.strip()
-
-    return result
-
-def _format_message(self, data: Dict[str, str]) -> List[str]:
-    """改进后的消息格式化"""
-    msg = [
-        f"🌦 精准天气 - {data.get('location', '未知地区')}",
-        "━" * 20
-    ]
-
-    # 核心天气指标
-    core_data = [
-        ("温度", "🌡️"),
-        ("体感", "👤"),
-        ("湿度", "💧"),
-        ("能见度", "👀"),
-        ("PM2.5", "🛡️"),
-        ("空气质量", "🏭"),
-        ("紫外线强度", "☀️"),
-        ("总体感觉", "📝")
-    ]
-    
-    # 添加核心数据
-    for key, emoji in core_data:
-        if value := data.get(key):
-            msg.append(f"{emoji} {key}: {value}")
-
-    # 降水提示（合并处理）
-    if rain := data.get("降水提示"):
-        msg.extend([
-            "",
-            "🌧️ 降水提示：",
-            f"▫️ {rain}"
-        ])
-
-    # 预警信息（增强显示）
-    if warning := data.get("预警信息"):
-        msg.extend([
-            "",
-            "⚠️ 气象预警：",
-            f"🔴 {warning}"
-        ])
-
-    # 添加数据时间
-    msg.append("\n⏱ 数据更新：实时播报")
-    return msg
+        return msg
 
     @filter.command("天气")
     async def weather_query(self, event: AstrMessageEvent):
@@ -139,9 +103,6 @@ def _format_message(self, data: Dict[str, str]) -> List[str]:
                 yield CommandResult().error("⚠️ 天气数据获取失败，请检查地址有效性")
                 return
 
-            if "预警信息" in data:
-                data["time"] = "实时更新（含预警信息）"
-            
             yield CommandResult().message("\n".join(self._format_message(data)))
 
         except Exception as e:

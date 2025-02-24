@@ -1,0 +1,6 @@
+name: astrbot_plugin_yqyb
+desc: 天气预报查询插件
+help: 发送「」获取最新票房数据
+version: 1.0.0
+author: nbx
+repo: https://github.com/N724/tqyb

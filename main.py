@@ -1,121 +1,88 @@
+from astrbot.api.all import *
 import aiohttp
-import json
-import logging
-from typing import Optional
-from aistrbot.api.all import AstrMessageEvent, CommandResult, Context, Plain
-import aistrbot.api.event.filter as filter
-from aistrbot.api.star import register, Star
+import re
 
-logger = logging.getLogger("astrbot")
-
-WEATHER_SOURCES = {
-    "moji": "墨迹天气",
-    "baidu": "百度天气",
-    "zgtq": "中国天气",
-    "zytq": "中央天气",
-    "cytq": "彩云天气"
-}
-
-@register("multi_weather", "Soulter", "多源天气查询", "2.0.0")
-class MultiWeather(Star):
-    def __init__(self, context: Context) -> None:
+@register("weather", "作者名", "多源天气查询插件", "1.0.0")
+class WeatherPlugin(Star):
+    def __init__(self, context: Context):
         super().__init__(context)
         self.api_url = "https://xiaoapi.cn/API/zs_tq.php"
-        self.timeout = aiohttp.ClientTimeout(total=15)
-
-    async def fetch_weather(self, params: dict) -> Optional[dict]:
-        """获取天气数据（带智能重试机制）"""
-        try:
-            async with aiohttp.ClientSession(timeout=self.timeout) as session:
-                async with session.get(self.api_url, params=params) as resp:
-                    raw_text = await resp.text()
-                    logger.debug(f"Weather API Response: {raw_text[:200]}...")
-                    
-                    if resp.status != 200:
-                        logger.error(f"HTTP Error: {resp.status}")
-                        return None
-                    
-                    try:
-                        return json.loads(raw_text)
-                    except json.JSONDecodeError:
-                        logger.error("Invalid JSON Response")
-                        return {"code": 201, "msg": "数据解析失败"}
-
-        except aiohttp.ClientError as e:
-            logger.error(f"Network Error: {str(e)}")
-            return {"code": 201, "msg": "网络连接异常"}
-        except Exception as e:
-            logger.error(f"Unexpected Error: {str(e)}", exc_info=True)
-            return {"code": 201, "msg": "服务器开小差了"}
-
-    @filter.command("天气")
-    async def query_weather(self, event: AstrMessageEvent):
-        '''[城市名] [来源] - 查询多版本天气（来源可选：moji/baidu/zgtq/zytq/cytq）'''
-        args = event.get_plain_args().split()
-        
-        # 🍃 参数验证
-        if len(args) < 1:
-            yield CommandResult().message("🌸 使用示例：天气 北京 cytq\n🌿 支持来源：" + "/".join(WEATHER_SOURCES.values()))
-            return
-
-        city = args[0]
-        source_type = args[1].lower() if len(args)>=2 else "cytq"
-        
-        # 🍄 校验天气源类型
-        if source_type not in WEATHER_SOURCES:
-            yield CommandResult().error(f"🚫 不支持的天气源哦～可用来源：{'/'.join(WEATHER_SOURCES.keys())}")
-            return
-
-        # 🌈 构建请求参数
-        params = {
-            "type": source_type,
-            "msg": city,
-            "n": "1"  # 默认返回详情
+        self.source_map = {
+            "baidu": "百度天气",
+            "moji": "墨迹天气",
+            "zgtq": "中国天气",
+            "zytq": "中央天气",
+            "cytq": "彩云天气"
         }
-        if len(args) >=3 and args[2].isdigit():
-            params["num"] = args[2]
 
-        # 🚀 发送请求
-        yield CommandResult().message(f"🌤️ 正在召唤{WEATHER_SOURCES[source_type]}...")
+    @filter.command("weather")
+    async def weather_query(self, event: AstrMessageEvent):
+        """
+        天气查询指令格式：
+        /weather [地区] [来源]
+        示例：/weather 北京 baidu
+        可用来源：baidu, moji, zgtq, zytq, cytq
+        """
+        args = event.message_str.split()[1:]
         
-        data = await self.fetch_weather(params)
-        if not data or data.get("code") != 200:
-            error_msg = data.get("msg", "未知错误") if data else "请求失败"
-            yield CommandResult().error(f"🌩️ 天气获取失败：{error_msg}")
+        # 解析参数
+        if len(args) < 1:
+            yield event.plain_result("❌ 请输入查询地区！\n示例：/weather 上海 moji")
             return
-
-        # 🎨 格式化消息
-        weather_info = [
-            f"📍 {data.get('name', '未知地区')}",
-            "🌐 数据来源：" + WEATHER_SOURCES.get(source_type, "未知")
-        ]
-
-        # ✨ 解析天气数据
-        if data.get("data"):
-            weather_info.extend(["🌡️ " + line for line in data["data"].split("\n") if line])
         
-        # 🌸 生活指数（仅中国天气）
-        if source_type == "zgtq" and data.get("shzs"):
-            weather_info.append("\n🌈 生活指数：")
-            weather_info.extend(["💡 " + line for line in data["shzs"].split("\n") if line])
+        location = args[0]
+        source_type = "baidu"  # 默认百度天气
+        
+        if len(args) >= 2 and args[1] in self.source_map:
+            source_type = args[1]
+        
+        try:
+            # 构建请求参数
+            params = {
+                "type": source_type,
+                "msg": location,
+                "n": "1"
+            }
+            
+            # 发送API请求
+            async with aiohttp.ClientSession() as session:
+                async with session.get(self.api_url, params=params) as response:
+                    data = await response.json()
+                    
+                    if data["code"] != 200:
+                        yield event.plain_result(f"❌ 查询失败，错误码：{data['code']}")
+                        return
+                    
+                    # 格式化响应数据
+                    result = [
+                        f"🌤 {self.source_map[source_type]} - {data['name']}",
+                        "➖" * 15
+                    ]
+                    
+                    # 解析天气数据
+                    weather_data = data["data"].split("\n")
+                    for line in weather_data:
+                        if "：" in line:
+                            key, value = line.split("：", 1)
+                            result.append(f"▫️ {key}: {value.strip()}")
+                    
+                    # 添加生活指数（中国天气特有）
+                    if source_type == "zgtq" and "shzs" in data:
+                        result.append("\n📊 生活指数：")
+                        result.append(data["shzs"].replace("\n", " | "))
+                    
+                    yield event.plain_result("\n".join(result))
+                    
+        except aiohttp.ClientError:
+            yield event.plain_result("❌ 网络请求失败，请稍后重试")
+        except Exception as e:
+            self.logger.error(f"Weather query error: {str(e)}")
+            yield event.plain_result("❌ 天气查询服务暂时不可用")
 
-        # 🍃 添加小提示
-        weather_info.append(f"\n📌 {data.get('tips', '')}")
-
-        yield CommandResult().message("\n".join(weather_info)).use_t2i(False)
-
-    @filter.command("天气帮助")
-    async def weather_help(self, event: AstrMessageEvent):
-        '''获取天气查询帮助'''
-        help_msg = [
-            "🌦️【多源天气查询指南】",
-            "指令格式：天气 [城市] [来源]",
-            "🌐 可用天气源：",
-            "\n".join([f"• {k} ({v})" for k,v in WEATHER_SOURCES.items()]),
-            "📝 示例：",
-            "天气 北京         → 默认使用彩云天气",
-            "天气 上海 moji    → 墨迹天气数据",
-            "天气 广州 zgtq 10 → 获取前10条中国天气数据",
-            "🍃 数据更新可能有延迟，请以实际情况为准～"
-        ]
-        yield CommandResult().message("\n".join(help_msg))
+    @filter.command("weather_sources")
+    async def list_sources(self, event: AstrMessageEvent):
+        """查看支持的天气源列表"""
+        sources = ["🔹 可用天气源："]
+        for key, name in self.source_map.items():
+            sources.append(f"{name} ({key})")
+        yield event.plain_result("\n".join(sources))

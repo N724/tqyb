@@ -8,148 +8,109 @@ from astrbot.api.star import register, Star
 
 logger = logging.getLogger("astrbot")
 
-@register("smart_weather", "nbx", "智能天气插件", "3.1.0")
-class WeatherStar(Star):
+@register("free_weather", "nbx", "自由格式天气插件", "3.2.0")
+class WeatherPlugin(Star):
     def __init__(self, context: Context) -> None:
         super().__init__(context)
-        self.api_url = "https://xiaoapi.cn/API/tq.php"
-        self.timeout = aiohttp.ClientTimeout(total=10)
-        self.headers = {"User-Agent": "AstrBot/WeatherPlugin"}
-        self.location_cache = {}
+        self.api_url = "https://xiaoapi.cn/API/zs_tq.php"
+        self.timeout = aiohttp.ClientTimeout(total=15)
+        self.weather_pattern = re.compile(
+            r"^(?:天气|查天气)?[ 　]*([\u4e00-\u9fa5]{2,20}?)(?:天气|的天气)?$"
+        )
 
     def _extract_location(self, text: str) -> Optional[str]:
-        """智能地点提取引擎"""
-        try:
-            # 清理干扰符号
-            clean_text = re.sub(r"[@#【】$$$$()（）]", "", text).strip()
-            
-            # 匹配多种格式模式
-            patterns = [
-                r"^(?:天气|查天气)?\s*([\u4e00-\u9fa5]{2,8}?)(?:天气|的天气)?$",  # 北京天气 / 天气北京
-                r"^(.+?)(?:的?天气|天气情况)$",  # 北京的天气 / 广州天气情况
-                r"^([\u4e00-\u9fa5]{2,8})$"  # 纯地名
-            ]
-            
-            for pattern in patterns:
-                if match := re.fullmatch(pattern, clean_text):
-                    location = match.group(1)
-                    if location in ["天气", "查天气"]:  # 过滤无效匹配
-                        continue
-                    return location
-            return None
-        except Exception as e:
-            logger.error(f"地点提取失败: {str(e)}")
-            return None
-
-    async def _fetch_weather(self, location: str) -> Optional[str]:
-        """获取天气数据（带缓存）"""
-        try:
-            # 检查缓存（5分钟有效期）
-            if cached := self.location_cache.get(location):
-                if time.time() - cached["timestamp"] < 300:
-                    return cached["data"]
-            
-            async with aiohttp.ClientSession(headers=self.headers, timeout=self.timeout) as session:
-                async with session.get(self.api_url, params={"msg": location}) as resp:
-                    if resp.status == 200:
-                        data = await resp.text(encoding='utf-8')
-                        self.location_cache[location] = {
-                            "timestamp": time.time(),
-                            "data": data
-                        }
-                        return data
-                    logger.error(f"API请求失败 HTTP {resp.status}")
-        except Exception as e:
-            logger.error(f"网络请求异常: {str(e)}")
+        """智能提取地点"""
+        # 清理特殊符号
+        clean_text = re.sub(r"[@#【】]", "", text.strip())
+        
+        # 匹配纯中文地点
+        if re.fullmatch(r"[\u4e00-\u9fa5]+", clean_text):
+            return clean_text
+        
+        # 匹配天气相关格式
+        if match := self.weather_pattern.match(clean_text):
+            return match.group(1)
+        
         return None
 
-    def _parse_weather_data(self, raw_data: str) -> dict:
-        """增强版数据解析"""
-        parsed = {
-            "location": "未知地区",
-            "temp": "N/A",
-            "feel_temp": "N/A",
-            "humidity": "N/A",
-            "warnings": []
-        }
-        
+    async def fetch_weather(self, location: str) -> Optional[dict]:
+        """获取天气数据"""
         try:
-            # 基础信息解析
-            if match := re.search(
-                r"^(.+?)\s+温度：([\d.-]+)℃\s+"
-                r"体感：([\d.-]+)℃\s+"
-                r"湿度：(\d+)%", 
-                raw_data
-            ):
-                parsed.update({
-                    "location": match.group(1).split()[-1],
-                    "temp": match.group(2),
-                    "feel_temp": match.group(3),
-                    "humidity": match.group(4)
-                })
-            
-            # 天气预警解析
-            if warnings := re.findall(r"【预警中】(.*?（数据来源：.*?）)", raw_data):
-                parsed["warnings"] = warnings
-                
-            # 降雨信息解析
-            if rain_info := re.search(r"您(.*?)正在下(.*?)，", raw_data):
-                parsed["rain"] = f"{rain_info.group(1)}{rain_info.group(2)}"
-            
-            return parsed
+            params = {
+                "type": "cytq",
+                "msg": location,
+                "n": "1"
+            }
+            async with aiohttp.ClientSession(timeout=self.timeout) as session:
+                async with session.get(self.api_url, params=params) as resp:
+                    if resp.status != 200:
+                        logger.error(f"API错误 HTTP {resp.status}")
+                        return None
+                    return await resp.json()
         except Exception as e:
-            logger.error(f"数据解析异常: {str(e)}")
-            return parsed
+            logger.error(f"请求失败: {str(e)}")
+            return None
 
-    def _build_response(self, data: dict) -> str:
-        """构建响应消息"""
+    def _build_message(self, data: dict) -> str:
+        """构建消息内容"""
         msg = [
-            f"🌏【{data['location']}实时天气】",
-            f"🌡️ 温度：{data['temp']}℃（体感{data['feel_temp']}℃）",
-            f"💧 湿度：{data['humidity']}%"
+            f"🌦 彩云天气 - {data.get('name', '未知地区')}",
+            "━" * 20
         ]
         
-        if 'rain' in data:
-            msg.append(f"🌧️ 周边降水：{data['rain']}")
+        if weather_data := data.get("data"):
+            # 解析原始数据
+            for line in weather_data.split("\n"):
+                if "：" in line:
+                    key, value = line.split("：", 1)
+                    msg.append(f"▫️ {key.strip()}：{value.strip()}")
+        
+        if time_str := data.get("time"):
+            msg.append(f"\n⏱ 数据时间：{time_str.split('.')}")
             
-        if data["warnings"]:
-            msg.append("\n🚨 气象预警：")
-            msg.extend([f"• {w}" for w in data["warnings"]])
-            
-        msg.append("\n📡 数据来源：中国气象局")
         return "\n".join(msg)
 
     @filter.command(".*")  # 匹配所有消息
-    async def smart_weather(self, event: AstrMessageEvent):
-        """智能天气查询"""
+    async def auto_weather(self, event: AstrMessageEvent):
+        """自动响应天气查询"""
         try:
-            # 获取原始消息内容
-            raw_text = getattr(event, 'content', '').strip()
+            raw_text = event.message_str.strip()
             if not raw_text:
                 return
                 
             # 提取地点
-            if not (location := self._extract_location(raw_text)):
+            location = self._extract_location(raw_text)
+            if not location:
                 return
                 
-            logger.info(f"识别到天气查询地点：{location}")
+            logger.info(f"识别到查询地点：{location}")
             
             # 发送等待提示
-            yield CommandResult().message(f"⛅ 正在获取【{location}】的天气...")
+            yield CommandResult().message(f"⏳ 正在获取 {location} 的天气...")
             
-            # 获取天气数据
-            if raw_data := await self._fetch_weather(location):
-                weather_data = self._parse_weather_data(raw_data)
-                if weather_data["temp"] == "N/A":
-                    yield CommandResult().error("⚠️ 天气数据解析失败，请尝试简化地点名称")
-                    return
-                    
-                yield CommandResult().message(self._build_response(weather_data))
-            else:
-                yield CommandResult().error("🌩️ 天气服务暂时不可用，请稍后再试")
+            # 获取数据
+            data = await self.fetch_weather(location)
+            if not data or data.get("code") != 200:
+                yield CommandResult().error("⚠️ 天气数据获取失败")
+                return
                 
+            yield CommandResult().message(self._build_message(data)).use_t2i(False)
+
         except Exception as e:
             logger.error(f"处理异常: {str(e)}", exc_info=True)
-            yield CommandResult().error("⚡ 系统开小差啦，请联系管理员")
+            yield CommandResult().error("💥 服务暂时不可用")
 
-# 配套文件
+    @filter.command("天气帮助")
+    async def weather_help(self, event: AstrMessageEvent):
+        """新版帮助信息"""
+        help_msg = [
+            "🌦 自由格式天气查询",
+            "支持以下任意格式：",
+            "1. 直接发送地名（例：北京）",
+            "2. 地名+天气（例：上海天气）",
+            "3. 天气+地名（例：天气广州）",
+            "4. 的天气格式（例：深圳的天气）",
+            "━" * 20,
+            "遇到问题请联系管理员"
+        ]
+        yield CommandResult().message("\n".join(help_msg))

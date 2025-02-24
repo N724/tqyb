@@ -14,7 +14,7 @@ class WeatherPlugin(Star):
         super().__init__(context)
         self.api_url = "https://xiaoapi.cn/API/zs_tq.php"
         self.timeout = aiohttp.ClientTimeout(total=15)  # 15秒超时
-        self.default_source = "cytq"  # 默认使用彩云天气
+        self.default_source = "zgtq"  # 默认使用彩云天气
 
     async def fetch_weather(self, location: str) -> Optional[dict]:
         """获取天气数据（增强错误处理）"""

@@ -19,7 +19,7 @@ class WeatherPlugin(Star):
         try:
             params = {"msg": location, "n": "1"}
             logger.debug(f"请求参数：{params}")
-            
+            
             async with aiohttp.ClientSession(timeout=self.timeout) as session:
                 async with session.get(self.api_url, params=params) as resp:
                     if resp.status != 200:
@@ -41,22 +41,20 @@ class WeatherPlugin(Star):
         """解析文本格式的天气数据"""
         result = {}
         lines = [line.strip() for line in text.split("\n") if line.strip()]
-        
+        
         if len(lines) < 2:
             return {"error": "无效的天气数据格式"}
 
-        # 解析地区信息（第一行）
+        # 解析基础信息
         result["location"] = lines
-        
-        # 解析详细数据（第二行开始）
         for line in lines[1:]:
             if "：" in line:
                 key, value = line.split("：", 1)
                 result[key.strip()] = value.strip()
+            elif line.startswith("预警信息："):
+                result["预警信息"] = line[5:].strip()
             elif "正在下" in line:
                 result["降水提示"] = line
-            elif line.startswith("预警信息："):
-                result["预警信息"] = line.replace("预警信息：", "", 1).strip()
 
         return result
 
@@ -82,8 +80,9 @@ class WeatherPlugin(Star):
             msg.extend(["", "⚠️ 气象预警：", f"🔴 {warning}"])
 
         # 数据时间
-        msg.extend(["", f"⏱ 数据时间：{data.get('time', '实时数据')}"])
-        
+        if time := data.get("time"):
+            msg.extend(["", f"⏱ 数据时间：{time}"])
+
         return msg
 
     @filter.command("天气")
@@ -103,6 +102,9 @@ class WeatherPlugin(Star):
                 yield CommandResult().error("⚠️ 天气数据获取失败，请检查地址有效性")
                 return
 
+            if "预警信息" in data:
+                data["time"] = "实时更新（含预警信息）"
+            
             yield CommandResult().message("\n".join(self._format_message(data)))
 
         except Exception as e:

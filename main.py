@@ -1,6 +1,5 @@
 import aiohttp
 import logging
-import re
 from typing import Optional, Dict, List
 from astrbot.api.all import AstrMessageEvent, CommandResult, Context, Plain
 import astrbot.api.event.filter as filter
@@ -8,7 +7,7 @@ from astrbot.api.star import register, Star
 
 logger = logging.getLogger("astrbot")
 
-@register("weather", "作者名", "彩云天气查询插件", "1.0.2")
+@register("weather", "作者名", "精准天气查询插件", "1.0.0")
 class WeatherPlugin(Star):
     def __init__(self, context: Context) -> None:
         super().__init__(context)
@@ -16,118 +15,151 @@ class WeatherPlugin(Star):
         self.timeout = aiohttp.ClientTimeout(total=15)
 
     async def fetch_weather(self, location: str) -> Optional[Dict[str, str]]:
-        """获取天气数据"""
+        """获取天气数据并解析为字典"""
         try:
             params = {"msg": location, "n": "1"}
-            logger.debug(f"[Weather] 请求参数：{params}")
+            logger.debug(f"请求参数：{params}")
             
             async with aiohttp.ClientSession(timeout=self.timeout) as session:
                 async with session.get(self.api_url, params=params) as resp:
                     if resp.status != 200:
-                        logger.error(f"[Weather] API响应异常 HTTP {resp.status}")
+                        logger.error(f"API请求失败 HTTP {resp.status}")
                         return None
 
                     raw_text = await resp.text()
-                    logger.debug(f"[Weather] 原始响应数据：{raw_text[:200]}...")
+                    logger.debug(f"API原始响应:\n{raw_text}")
                     return self._parse_weather_text(raw_text)
 
         except aiohttp.ClientError as e:
-            logger.error(f"[Weather] 网络请求失败：{str(e)}")
+            logger.error(f"网络请求异常: {str(e)}")
             return None
         except Exception as e:
-            logger.error(f"[Weather] 未知异常：{str(e)}", exc_info=True)
+            logger.error(f"未知异常: {str(e)}", exc_info=True)
             return None
 
     def _parse_weather_text(self, text: str) -> Dict[str, str]:
-        """解析天气文本数据"""
-        result = {}
-        lines = [line.strip() for line in text.split("\n") if line.strip()]
+    """改进后的文本解析方法"""
+    result = {}
+    lines = text.strip().split("\n")
+    
+    if len(lines) < 2:
+        return {"error": "无效的天气数据格式"}
+    
+    # 解析地区名称（处理可能的列表格式）
+    location_line = lines.strip("[]'")
+    if "','" in location_line:  # 处理数组格式
+        result["location"] = location_line.split("', '")
+    else:
+        result["location"] = location_line
+    
+    # 解析数据字段
+    for line in lines[1:]:
+        line = line.strip().strip("',")
+        if not line:
+            continue
         
-        if len(lines) < 2:
-            return {"error": "数据格式异常"}
-
-        # 解析地理位置
-        try:
-            first_line = lines
-            if first_line.startswith('[') and first_line.endswith(']'):
-                locations = first_line[1:-1].replace("'", "").split(", ")
-                result["location"] = locations if locations else "未知地区"
-            else:
-                result["location"] = first_line
-        except Exception as e:
-            logger.error(f"[Weather] 地址解析失败：{str(e)}")
-            result["location"] = "未知地区"
-
-        # 解析天气数据
-        for line in lines[1:]:
-            line = re.sub(r"[，。！!]+$", "", line)
-            
-            if "正在下" in line and ("转" in line or "后转" in line):
-                result["rain"] = line.replace("您", "📍").replace("哦，", "")
+        # 处理降水提示
+        if "正在下" in line and "转" in line:
+            result["降水提示"] = line.replace("您", "📍").replace("哦，", "，")
+            continue
+        
+        # 处理预警信息
+        if line.startswith("预警信息："):
+            result["预警信息"] = line[5:].replace("【", "[").replace("】", "]")
+            continue
+        
+        # 解析键值对
+        if "：" in line:
+            key, value = line.split("：", 1)
+            key = key.strip().replace("pm2.5", "PM2.5")
+            if key in result:  # 避免重复字段
                 continue
-            
-            if line.startswith("预警信息：") or line.startswith("【"):
-                result["alert"] = line.replace("预警信息：", "")
-                continue
-            
-            if "：" in line:
-                key, value = line.split("：", 1)
-                result[key.strip()] = value.strip()
+            result[key] = value.strip()
 
-        return result
+    return result
+
+def _format_message(self, data: Dict[str, str]) -> List[str]:
+    """改进后的消息格式化"""
+    msg = [
+        f"🌦 精准天气 - {data.get('location', '未知地区')}",
+        "━" * 20
+    ]
+
+    # 核心天气指标
+    core_data = [
+        ("温度", "🌡️"),
+        ("体感", "👤"),
+        ("湿度", "💧"),
+        ("能见度", "👀"),
+        ("PM2.5", "🛡️"),
+        ("空气质量", "🏭"),
+        ("紫外线强度", "☀️"),
+        ("总体感觉", "📝")
+    ]
+    
+    # 添加核心数据
+    for key, emoji in core_data:
+        if value := data.get(key):
+            msg.append(f"{emoji} {key}: {value}")
+
+    # 降水提示（合并处理）
+    if rain := data.get("降水提示"):
+        msg.extend([
+            "",
+            "🌧️ 降水提示：",
+            f"▫️ {rain}"
+        ])
+
+    # 预警信息（增强显示）
+    if warning := data.get("预警信息"):
+        msg.extend([
+            "",
+            "⚠️ 气象预警：",
+            f"🔴 {warning}"
+        ])
+
+    # 添加数据时间
+    msg.append("\n⏱ 数据更新：实时播报")
+    return msg
 
     @filter.command("天气")
     async def weather_query(self, event: AstrMessageEvent):
-        '''查询天气'''
+        '''查询天气，格式：/天气 [地区]（支持街道级查询）'''
         try:
-            # 正确的参数解析方式
-            cmd_parts = event.message_str.split(maxsplit=1)
-            if len(cmd_parts) < 2:
-                yield CommandResult().error("❌ 格式错误\n正确格式：/天气 地区\n示例：/天气 上海徐家汇")
+            args = event.message_str.split()
+            if len(args) < 2:
+                yield CommandResult().error("❌ 请提供查询地址\n示例：/天气 北京朝阳区望京街道")
                 return
 
-            location = cmd_parts.strip()  # 正确获取参数
-            logger.info(f"[Weather] 查询位置：{location}")
-
+            location = ' '.join(args[1:])
             yield CommandResult().message(f"🌤 正在获取【{location}】的天气数据...")
 
             data = await self.fetch_weather(location)
             if not data or "error" in data:
-                yield CommandResult().error("⚠️ 查询失败，请检查地区是否存在")
+                yield CommandResult().error("⚠️ 天气数据获取失败，请检查地址有效性")
                 return
 
-            # 构建响应消息
-            msg = [
-                f"🌤 彩云天气 - {data.get('location', '未知地区')}",
-                "▬▬▬▬▬▬▬▬▬▬▬▬▬▬",
-                f"▫️ 温度：{data.get('温度', 'N/A')}℃",
-                f"▫️ 体感：{data.get('体感', 'N/A')}℃",
-                f"▫️ 湿度：{data.get('湿度', 'N/A')}%",
-                f"▫️ 能见度：{data.get('能见度', 'N/A')}千米"
-            ]
-
-            if rain_info := data.get("rain"):
-                msg.extend(["", "🌧 降水提示：", f"   ⚠️ {rain_info}"])
-                
-            if alert_info := data.get("alert"):
-                msg.extend(["", "⚠️ 气象预警：", f"   🔴 {alert_info}"])
-
-            msg.append("\n⏱ 数据时间：实时更新")
-            yield CommandResult().message("\n".join(msg))
+            if "预警信息" in data:
+                data["time"] = "实时更新（含预警信息）"
+            
+            yield CommandResult().message("\n".join(self._format_message(data)))
 
         except Exception as e:
-            logger.error(f"[Weather] 指令处理异常：{str(e)}", exc_info=True)
-            yield CommandResult().error("💥 服务异常，请稍后重试")
+            logger.error(f"处理指令异常: {str(e)}", exc_info=True)
+            yield CommandResult().error("💥 天气查询服务暂时不可用")
 
     @filter.command("天气帮助")
     async def weather_help(self, event: AstrMessageEvent):
+        """获取帮助信息"""
         help_msg = [
             "📘 使用说明：",
-            "/天气 <地区> - 查询天气（支持街道级）",
-            "▬▬▬▬▬▬▬▬▬▬▬▬▬▬",
-            "示例：",
-            "  /天气 北京朝阳区",
-            "  /天气 广州天河区体育西路",
-            "  /天气 杭州西湖风景区"
+            "/天气 <地址> - 支持街道级天气查询（例：/天气 上海徐汇区徐家汇街道）",
+            "/天气帮助 - 显示本帮助信息",
+            "━" * 20,
+            "功能特性：",
+            "🔸 精确到街道级的天气查询",
+            "🔸 实时温度/湿度/体感温度",
+            "🔸 降水提示及气象预警",
+            "🔸 空气质量与紫外线指数"
         ]
         yield CommandResult().message("\n".join(help_msg))
